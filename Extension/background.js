@@ -1,4 +1,5 @@
 import GDPRConfig from './GDPRConfig.js';
+import {selectorsForHost} from '../filters/parse-cookie-filters.cjs';
 
 const STATUS = {
     "INIT": 0,
@@ -14,6 +15,45 @@ chrome.runtime.onMessage.addListener(function (message, sender, reply) {
     switch (message.split("|")[0]) {
         case "GetTabUrl": {
             reply(sender.tab.url);
+            return false;
+        }
+
+        case "AskUser": {
+            // A CMP was found inside an iframe: ask the top frame of the tab to show the unified popup
+            let request = JSON.parse(message.substring(message.indexOf("|")+1));
+            request.type = "ShowUnifiedPopup";
+            chrome.tabs.sendMessage(sender.tab.id, request, {frameId: 0}).then((answer)=>{
+                reply(answer == null ? null : answer);
+            }).catch((e)=>{
+                console.warn("Could not show unified popup in top frame:", e);
+                reply(null);
+            });
+            return true;
+        }
+
+        case "ShowToast": {
+            // A CMP inside an iframe was handled: show the action notification in the top frame
+            let request = JSON.parse(message.substring(message.indexOf("|")+1));
+            request.type = "ShowToast";
+            chrome.tabs.sendMessage(sender.tab.id, request, {frameId: 0}).catch((e)=>{
+                console.warn("Could not show action notification in top frame:", e);
+            });
+            reply();
+            return false;
+        }
+
+        case "GetCookieFilters": {
+            // Selectors from the bundled cookie-notice filter list that apply on the given host
+            let host = message.substring(message.indexOf("|")+1);
+            loadCookieFilters().then((filters)=>{
+                reply(filters == null ? [] : selectorsForHost(filters, host));
+            });
+            return true;
+        }
+
+        case "OpenOptions": {
+            chrome.runtime.openOptionsPage();
+            reply();
             return false;
         }
 
@@ -122,15 +162,17 @@ chrome.runtime.onMessage.addListener(function (message, sender, reply) {
 });
 
 function setBadgeCheckmark(text, id) {
-    if (chrome.browserAction){
-        if (chrome.browserAction.setBadgeText){
-            chrome.browserAction.setBadgeText({
+    // MV3 (Chromium) uses chrome.action, MV2 (Firefox/Safari) uses chrome.browserAction
+    const actionApi = chrome.action || chrome.browserAction;
+    if (actionApi){
+        if (actionApi.setBadgeText){
+            actionApi.setBadgeText({
                 text: text,
                 tabId: id
             });
         }
-        if (chrome.browserAction.setBadgeBackgroundColor){
-            chrome.browserAction.setBadgeBackgroundColor({
+        if (actionApi.setBadgeBackgroundColor){
+            actionApi.setBadgeBackgroundColor({
                 color: "white",
                 tabId: id
             });
@@ -183,6 +225,12 @@ function fetchRules(forceUpdate) {
                     }
                 }
 
+                // Consent-O-Manual: our own bundled rules are always loaded last so they take precedence
+                let plusRules = await fetchRulesList(chrome.runtime.getURL("plus-rules.json"));
+                if (plusRules != null) {
+                    rules.push(plusRules);
+                }
+
                 chrome.storage.local.set({
                     cachedEntries: cachedEntries
                 }, () => {
@@ -197,6 +245,21 @@ function fetchRules(forceUpdate) {
 }
 
 let tabStatusMap = new Map();
+
+// Consent-O-Manual: the parsed cookie-notice filter list, loaded once per service worker lifetime
+let cookieFiltersPromise = null;
+function loadCookieFilters() {
+    if (cookieFiltersPromise == null) {
+        cookieFiltersPromise = fetch(chrome.runtime.getURL("cookie-filters.json"))
+            .then((response)=>response.json())
+            .catch((e)=>{
+                console.warn("Could not load cookie filter list:", e);
+                cookieFiltersPromise = null;
+                return null;
+            });
+    }
+    return cookieFiltersPromise;
+}
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab)=>{
     if(info.status != null && info.status === "Loading") {

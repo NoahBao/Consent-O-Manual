@@ -1,4 +1,5 @@
 import CMP from "./CMP.js";
+import {answerFilterListBanner} from "./FilterListCMP.js";
 
 export default class ConsentEngine {
     constructor(config, consentTypes, handledCallback) {
@@ -246,6 +247,34 @@ export default class ConsentEngine {
                             self.startObserver();
                             self.handleMutations([]);
                         } else {
+                            // Consent-O-Manual: decide what to answer (per-site preference,
+                            // global setting, or ask the user via the unified popup) before touching the CMP
+                            clearTimeout(self.stopEngineId);
+                            if (ConsentEngine.decisionProvider != null) {
+                                let decision = null;
+                                try {
+                                    decision = await ConsentEngine.decisionProvider(cmp.name);
+                                } catch (e) {
+                                    console.error("Consent-O-Manual: could not resolve a decision:", e);
+                                }
+
+                                if (decision == null) {
+                                    // User chose "Not now" (or something failed): leave the site's own banner alone
+                                    if (ConsentEngine.debugValues.debugLog) {
+                                        console.log(cmp.name + " - no decision, leaving CMP untouched");
+                                    }
+                                    clearInterval(self.domScannerIntervalID);
+                                    self.checkRunning = false;
+                                    self.handledCallback({
+                                        handled: false,
+                                        dismissed: true
+                                    });
+                                    return;
+                                }
+
+                                self.consentTypes = decision;
+                            }
+
                             try {
                                 self.numClicks = 0;
 
@@ -366,6 +395,61 @@ export default class ConsentEngine {
             await checkIsShowing();
         } else {
             self.checkRunning = false;
+            // Consent-O-Manual: no rule matched, so look for a banner the cookie filter list knows about
+            if (ConsentEngine.filterListDetector != null && !self.filterListDone) {
+                await self.checkFilterList();
+            }
+        }
+    }
+
+    /**
+     * Consent-O-Manual: handle a cookie banner found with the cookie-notice filter list.
+     * The match must stay visible for a second with no rule matching, so rules always win.
+     */
+    async checkFilterList() {
+        const found = ConsentEngine.filterListDetector.scan();
+        if (found == null) {
+            this.filterListCandidate = null;
+            return;
+        }
+        if (this.filterListCandidate == null || this.filterListCandidate.element !== found.element) {
+            this.filterListCandidate = {element: found.element, since: Date.now()};
+            // Keep the engine running long enough to act on it
+            this.startStopTimeout();
+            return;
+        }
+        if (Date.now() - this.filterListCandidate.since < 1000) return;
+
+        if (ConsentEngine.debugValues.debugLog) {
+            console.log("Cookie banner found with the filter list:", found.selector, found.element);
+        }
+
+        this.filterListDone = true;
+        this.checkRunning = true;
+        this.stopObserver();
+        clearTimeout(this.stopEngineId);
+        clearInterval(this.domScannerIntervalID);
+
+        let result = null;
+        try {
+            result = await answerFilterListBanner(found.element, ConsentEngine.decisionProvider);
+        } catch (e) {
+            console.error("Consent-O-Manual: could not answer banner from the filter list:", e);
+            this.checkRunning = false;
+            this.handledCallback({handled: false, error: true});
+            return;
+        }
+        this.checkRunning = false;
+
+        if (result == null) {
+            this.handledCallback({handled: false, dismissed: true});
+        } else {
+            this.handledCallback({
+                handled: true,
+                cmpName: "Cookie filter list",
+                clicks: result.clicks,
+                action: {mode: result.mode}
+            });
         }
     }
 
@@ -474,3 +558,14 @@ export default class ConsentEngine {
 }
 
 ConsentEngine.singleton = null;
+
+/**
+ * Optional async function(cmpName) => consentValues|null, set by the content script.
+ * Returning null means "do nothing on this page".
+ */
+ConsentEngine.decisionProvider = null;
+
+/**
+ * Optional FilterListDetector (set by the content script in the top frame) used when no rule matches.
+ */
+ConsentEngine.filterListDetector = null;

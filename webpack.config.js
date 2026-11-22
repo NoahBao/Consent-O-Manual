@@ -4,6 +4,7 @@ const ZipPlugin = require('zip-webpack-plugin');
 const CopyPlugin = require("copy-webpack-plugin");
 const path = require('path');
 const glob = require("glob");
+const {parseCookieFilters} = require("./filters/parse-cookie-filters.cjs");
 module.exports = env=>({
   mode: 'production',
   entry: {
@@ -11,8 +12,12 @@ module.exports = env=>({
     content: [
       './Extension/contentScript.js',
       "./Extension/content.scss",
+      "./Extension/icon_16.png",
+      "./Extension/icon_32.png",
       "./Extension/icon_48.png",
       "./Extension/icon_96.png",
+      "./Extension/icon_128.png",
+      "./Extension/logo.png",
       ...glob.sync(__dirname + "/Extension/*.svg")
     ],
     ui: [
@@ -68,6 +73,26 @@ module.exports = env=>({
   },
   plugins: [
     new CopyPlugin({patterns: [{
+        // Consent-O-Manual: cookie-notice filter list -> selectors used to detect banners no rule covers
+        from: "filters/cookie-notices.txt",
+        to: "cookie-filters.json",
+        transform(content) {
+            return JSON.stringify(parseCookieFilters(content.toString()));
+        }
+    }, {
+        // Consent-O-Manual: merge our own rule files into one bundled rule list
+        from: "rules-plus/*.json",
+        to: "plus-rules.json",
+        transformAll(assets) {
+            const merged = {};
+            assets.forEach((asset) => {
+                const rules = JSON.parse(asset.data.toString());
+                delete rules["$schema"];
+                Object.assign(merged, rules);
+            });
+            return JSON.stringify(merged);
+        }
+    }, {
         from: "Extension/manifest." + env.target + ".json",
         to: "manifest.json",
         force: true,
