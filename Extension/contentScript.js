@@ -3,6 +3,7 @@ import ConsentEngine from "./ConsentEngine.js";
 import UnifiedPopup from "./UnifiedPopup.js";
 import ActionToast from "./ActionToast.js";
 import {FilterListDetector} from "./FilterListCMP.js";
+import {computeClicksSaved} from "./ClickStats.js";
 
 const insideIframe = window !== window.parent;
 
@@ -54,7 +55,7 @@ function createDecisionProvider(host) {
             console.log("Consent-O-Manual decision for", host, decision);
         }
         if (decision.mode !== "ask") {
-            lastAction = {mode: decision.mode, source: decision.source};
+            lastAction = {mode: decision.mode, source: decision.source, userClicks: 0};
             return decision.values;
         }
 
@@ -77,7 +78,7 @@ function createDecisionProvider(host) {
         if (answer.remember) {
             await GDPRConfig.setSitePreference(host, answer);
         }
-        lastAction = {mode: answer.mode, source: "asked"};
+        lastAction = {mode: answer.mode, source: "asked", userClicks: answer.userClicks || 0};
 
         const subsetValues = await GDPRConfig.getConsentValues();
         return GDPRConfig.valuesForMode(answer.mode, subsetValues, answer.values);
@@ -113,7 +114,14 @@ async function contentScriptRunner() {
             });
         });
     }
-    const urlObj = new URL(url);
+    // No answer from the service worker (e.g. it failed to start) or an unusual frame URL: do nothing
+    let urlObj;
+    try {
+        urlObj = new URL(url);
+    } catch (e) {
+        console.warn("Consent-O-Manual: could not work out the page address, skipping this frame", url);
+        return;
+    }
     url = urlObj.host;
 
     GDPRConfig.isActive(url).then(async (active) => {
@@ -168,6 +176,14 @@ async function contentScriptRunner() {
                                             result.cmp = evt.cmpName;
                                             result.clicks = evt.clicks;
                                             result.url = url;
+                                            // Clicks saved compared with answering the site's own banner by hand
+                                            result.saved = computeClicksSaved({
+                                                clicksMade: evt.clicks,
+                                                values: evt.values,
+                                                oneClick: evt.oneClick,
+                                                actionMode: evt.action != null ? evt.action.mode : null,
+                                                userClicks: lastAction != null ? lastAction.userClicks : 0
+                                            });
         
                                             chrome.runtime.sendMessage("HandledCMP|"+JSON.stringify(result));
                                             // Filter-list banners report what was really done (it may differ from the choice)
